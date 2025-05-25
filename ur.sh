@@ -2,7 +2,7 @@
 set -euo pipefail
 
   ##############################################################################################
- #|#   ~ Ubuntu From Scratch ~    # | #    Version: 0.1     # | #    Last Update: 2025-05-25   #|#
+ #|#   ~ Ubuntu From Scratch ~    # | #    Version: 0.1     # | #    Last Update: 2025-05-23   #|#
 ## ============================================================================================ ##
 ##  Description:                                                                                ##
 ##     This script aims to automate the initial setup of a fresh Ubuntu installation and is     ##
@@ -121,7 +121,7 @@ systemctl enable fail2ban
 systemctl start fail2ban
 
 # install and configure docker
-apt install apt-transport-https ca-certificates curl software-properties-common -y
+apt install -y apt-transport-https ca-certificates curl software-properties-common
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 apt update
@@ -133,8 +133,8 @@ mkdir -p ~/.docker/cli-plugins
 curl -SL https://github.com/docker/compose/releases/latest/docker-compose-linux-x86_64 -o ~/.docker/cli-plugins/docker-compose
 chmod +x ~/.docker/cli-plugins/docker-compose
 
-# install python, pip and the virtual environment
-apt install pyton3 python3-pip python3-venv -y
+# install python and development tools
+apt install -y pyton3 python3-pip python3-dev python3-venv build-essential libssl-dev libffi-dev
 
 # reboot the system
 reboot
