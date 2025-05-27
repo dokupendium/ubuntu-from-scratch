@@ -65,7 +65,7 @@ set -euo pipefail
 locale="de_DE.UTF-8"                                                                
 timezone="Europe/Berlin"                                                                          
 user="Username"                                                                        
-port="22"                                                                                       
+ssh_port="22"                                                                                       
 
 
  ################################
@@ -80,17 +80,23 @@ update-locale LANG=$locale
 timedatectl set-timezone $timezone
 
 # create new user and add to sudo group
-adduser $user
-usermod -aG sudo $user
+if id "$user" &>/dev/null; then
+  echo "Benutzer $user existiert bereits."
+else
+  adduser $user
+  usermod -aG sudo $user
+fi
 
 # copy the ssh keys for new user
-rsync --archive --chown=$user:$user ~/.ssh /home/$user
+if [ -d ~/.ssh ]; then
+  rsync --archive --chown=$user:$user ~/.ssh /home/$user
+fi
 
 # backup and configure the ssh server
 cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
 sed -i -e '/^\(#\|\)PermitRootLogin/s/^.*$/PermitRootLogin no/' /etc/ssh/sshd_config
 sed -i -e '/^\(#\|\)PasswordAuthentication/s/^.*$/PasswordAuthentication no/' /etc/ssh/sshd_config
-sed -i -e '/^\(#\|\)Port/s/^.*$/Port $port/' /etc/ssh/sshd_config
+sed -i -e "/^\(#\|\)Port/s/^.*$/Port $ssh_port/" /etc/ssh/sshd_config
 sed -i -e '/^\(#\|\)KbdInteractiveAuthentication/s/^.*$/KbdInteractiveAuthentication no/' /etc/ssh/sshd_config
 sed -i -e '/^\(#\|\)ChallengeResponseAuthentication/s/^.*$/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config
 sed -i -e '/^\(#\|\)MaxAuthTries/s/^.*$/MaxAuthTries 2/' /etc/ssh/sshd_config
@@ -98,7 +104,8 @@ sed -i -e '/^\(#\|\)AllowTcpForwarding/s/^.*$/AllowTcpForwarding no/' /etc/ssh/s
 sed -i -e '/^\(#\|\)X11Forwarding/s/^.*$/X11Forwarding no/' /etc/ssh/sshd_config
 sed -i -e '/^\(#\|\)AllowAgentForwarding/s/^.*$/AllowAgentForwarding no/' /etc/ssh/sshd_config
 sed -i -e '/^\(#\|\)AuthorizedKeysFile/s/^.*$/AuthorizedKeysFile .ssh\/authorized_keys/' /etc/ssh/sshd_config
-sed -i '$a AllowUsers $user' /etc/ssh/sshd_config
+sed -i "$a AllowUsers $user" /etc/ssh/sshd_config
+sshd -t || { echo "SSH-Konfiguration fehlerhaft!"; exit 1; }
 systemctl restart sshd
 
 # update index and upgrade packages
@@ -109,14 +116,19 @@ apt install unattended-upgrades -y
 dpkg-reconfigure --priority=low unattended-upgrades
 
 # configure the firewall
+if ! command -v ufw &>/dev/null; then
+  apt install ufw -y
+fi
 ufw default deny incoming
 ufw default allow outgoing
-ufw allow $port/tcp
-ufw enable
+ufw allow $ssh_port/tcp
+ufw status | grep -q inactive && echo "y" | ufw enable
 
 # install and configure fail2ban
 apt install fail2ban -y
-cp /etc/fail2ban/jail.conf /etc/fail2ban/jail.local
+if [ ! -f /etc/fail2ban/jail.local ]; then
+  cp /etc/fail2ban/jail.conf /etc/fail2ban/jail.local
+fi
 systemctl enable fail2ban
 systemctl start fail2ban
 
@@ -125,16 +137,26 @@ apt install -y apt-transport-https ca-certificates curl software-properties-comm
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 apt update
-apt install docker-ce
+if ! apt-cache policy docker-ce | grep -q 'Candidate:'; then
+  echo "Docker-CE Paket nicht gefunden!"; exit 1;
+fi
+apt install docker-ce -y
 usermod -aG docker $user
 
-# install docker-compose
+# install docker-compose (architekturabhängig)
+ARCH=$(uname -m)
 mkdir -p ~/.docker/cli-plugins
-curl -SL https://github.com/docker/compose/releases/latest/docker-compose-linux-x86_64 -o ~/.docker/cli-plugins/docker-compose
+if [ "$ARCH" = "x86_64" ]; then
+  curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 -o ~/.docker/cli-plugins/docker-compose
+elif [ "$ARCH" = "aarch64" ]; then
+  curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-aarch64 -o ~/.docker/cli-plugins/docker-compose
+else
+  echo "Nicht unterstützte Architektur: $ARCH"; exit 1;
+fi
 chmod +x ~/.docker/cli-plugins/docker-compose
 
 # install python and development tools
-apt install -y pyton3 python3-pip python3-dev python3-venv build-essential libssl-dev libffi-dev
+apt install -y python3 python3-pip python3-dev python3-venv build-essential libssl-dev libffi-dev
 
 # reboot the system
-reboot
+read -p "System jetzt neu starten? (y/n): " confirm && [[ $confirm == [yY] ]] && reboot
