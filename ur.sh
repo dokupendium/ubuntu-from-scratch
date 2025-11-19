@@ -2,7 +2,7 @@
 set -euo pipefail
 
   ##############################################################################################
- #|#   ~ Ubuntu From Scratch ~    # | #    Version: 0.1     # | #    Last Update: 2025-05-23   #|#
+ #|#   ~ Ubuntu From Scratch ~    # | #    Version: 0.2    # | #    Last Update: 2025-11-19   #|#
 ## ============================================================================================ ##
 ##  Description:                                                                                ##
 ##     This script aims to automate the initial setup of a fresh Ubuntu installation and is     ##
@@ -13,11 +13,11 @@ set -euo pipefail
 ## ============================================================================================ ##
 ##  Usage:                                                                                      ##
 ##     1. Check for the latest version at https://github.com/dokupendium/ubuntu-from-scratch.   ##
-##     2. If your hoster supports initiazation scripts, you can copy-paste it. Otherwise        ##
-##        Download the script to your server or virtual machine and make it executable.         ##
+##     2. Download the script to your server or virtual machine and make it executable.         ##
 ##        `wget https://raw.githubusercontent.com/dokupendium/ubuntu-from-scratch/main/ur.sh`   ##
 ##        `chmod +x ur.sh`                                                                      ##
 ##     3. Please review the code first and make sure you understand what it does.               ##
+##        `nano ur.sh`                                                                          ##
 ##     3. Set the variables below to your needs.                                                ##
 ##     4. Run the script with `sudo bash ur.sh`.                                                ##
 ##     5. Follow the instructions and reboot the system.                                        ##
@@ -38,6 +38,8 @@ set -euo pipefail
 ## ============================================================================================ ##
 ##  Changelog:                                                                                  ##
 ##     2025-05-16: Initial version.                                                             ##
+##     2025-11-19: Added   -> Root-Check, Swap Configuration, New Variables hostname & pubkey   ##
+##                 Changed -> Updated Docker (Compose) Installation                             ##
 ## ============================================================================================ ##
 ##  To Do:                                                                                      ##
 ##     - Add more packages and configurations.                                                  ##
@@ -63,14 +65,24 @@ set -euo pipefail
 
 # Set the variables below to your needs
 locale="de_DE.UTF-8"                                                                
-timezone="Europe/Berlin"                                                                          
-user="Username"                                                                        
-ssh_port="22"                                                                                       
+timezone="Europe/Berlin"
+hostname="HostName"                                                                          
+user="UserName"                                                                        
+ssh_port="22"
+pubkey="ssh-ed25519 AAAAC3...YOUR_KEY... user@local"                                                                                       
 
 
  ################################
 #|#      ~ SCRIPT LOGIC ~      #|#
  ################################
+
+# check root privilege
+if [ "$EUID" -ne 0 ]; then
+  echo "❌ Please run as root!"
+  exit 1
+fi
+
+export DEBIAN_FRONTEND=noninteractive
 
 # set the locale
 locale-gen $locale
@@ -79,18 +91,26 @@ update-locale LANG=$locale
 # set the timezone
 timedatectl set-timezone $timezone
 
+# set the hostname
+hostnamectl set-hostname "$hostname"
+echo "127.0.0.1 $hostname" >> /etc/hosts
+
 # create new user and add to sudo group
 if id "$user" &>/dev/null; then
-  echo "Benutzer $user existiert bereits."
+  echo "User $user already exists."
 else
-  adduser $user
+  adduser --disabled-password --gecos "" $user
   usermod -aG sudo $user
 fi
 
 # copy the ssh keys for new user
-if [ -d ~/.ssh ]; then
-  rsync --archive --chown=$user:$user ~/.ssh /home/$user
+if [ ! -d /home/$user/.ssh ]; then
+  mkdir -p /home/$user/.ssh
+  chmod 700 /home/$user/.ssh
 fi
+echo "$pubkey" > /home/$user/.ssh/authorized_keys
+chmod 600 /home/$user/.ssh/authorized_keys
+chown -R $user:$user /home/$user/.ssh
 
 # backup and configure the ssh server
 cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
@@ -104,8 +124,10 @@ sed -i -e '/^\(#\|\)AllowTcpForwarding/s/^.*$/AllowTcpForwarding no/' /etc/ssh/s
 sed -i -e '/^\(#\|\)X11Forwarding/s/^.*$/X11Forwarding no/' /etc/ssh/sshd_config
 sed -i -e '/^\(#\|\)AllowAgentForwarding/s/^.*$/AllowAgentForwarding no/' /etc/ssh/sshd_config
 sed -i -e '/^\(#\|\)AuthorizedKeysFile/s/^.*$/AuthorizedKeysFile .ssh\/authorized_keys/' /etc/ssh/sshd_config
-sed -i "$a AllowUsers $user" /etc/ssh/sshd_config
-sshd -t || { echo "SSH-Konfiguration fehlerhaft!"; exit 1; }
+if ! grep -q "AllowUsers $user" /etc/ssh/sshd_config; then
+    sed -i "$a AllowUsers $user" /etc/ssh/sshd_config
+fi
+sshd -t || { echo "Check SSH-Configuration!"; exit 1; }
 systemctl restart sshd
 
 # update index and upgrade packages
@@ -132,31 +154,40 @@ fi
 systemctl enable fail2ban
 systemctl start fail2ban
 
-# install and configure docker
+# configure swap file
+if [ ! -f /swapfile ]; then
+    echo "Erstelle Swapfile..."
+    fallocate -l 4G /swapfile
+    chmod 600 /swapfile
+    mkswap /swapfile
+    swapon /swapfile
+    echo '/swapfile none swap sw 0 0' | tee -a /etc/fstab
+    echo "vm.swappiness=10" | tee -a /etc/sysctl.conf
+    sysctl -p
+else
+    echo "Swapfile existiert bereits."
+fi
+
+# install and configure docker (commpose)
 apt install -y apt-transport-https ca-certificates curl software-properties-common
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  tee /etc/apt/sources.list.d/docker.list > /dev/null
+
 apt update
 if ! apt-cache policy docker-ce | grep -q 'Candidate:'; then
   echo "Docker-CE Paket nicht gefunden!"; exit 1;
 fi
-apt install docker-ce -y
+apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y
 usermod -aG docker $user
-
-# install docker-compose (architekturabhängig)
-ARCH=$(uname -m)
-mkdir -p ~/.docker/cli-plugins
-if [ "$ARCH" = "x86_64" ]; then
-  curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 -o ~/.docker/cli-plugins/docker-compose
-elif [ "$ARCH" = "aarch64" ]; then
-  curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-aarch64 -o ~/.docker/cli-plugins/docker-compose
-else
-  echo "Nicht unterstützte Architektur: $ARCH"; exit 1;
-fi
-chmod +x ~/.docker/cli-plugins/docker-compose
 
 # install python and development tools
 apt install -y python3 python3-pip python3-dev python3-venv build-essential libssl-dev libffi-dev
 
 # reboot the system
-read -p "System jetzt neu starten? (y/n): " confirm && [[ $confirm == [yY] ]] && reboot
+read -p "Reboot System Now? (y/n): " confirm && [[ $confirm == [yY] ]] && reboot
