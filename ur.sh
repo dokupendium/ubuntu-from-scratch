@@ -2,7 +2,7 @@
 set -euo pipefail
 
   ##############################################################################################
- #|#   ~ Ubuntu From Scratch ~    # | #    Version: 0.2    # | #    Last Update: 2025-11-19   #|#
+ #|#   ~ Ubuntu From Scratch ~    # | #    Version: 0.3    # | #    Last Update: 2025-11-25   #|#
 ## ============================================================================================ ##
 ##  Description:                                                                                ##
 ##     This script aims to automate the initial setup of a fresh Ubuntu installation and is     ##
@@ -40,6 +40,8 @@ set -euo pipefail
 ##     2025-05-16: Initial version.                                                             ##
 ##     2025-11-19: Added   -> Root-Check, Swap Configuration, New Variables hostname & pubkey   ##
 ##                 Changed -> Updated Docker (Compose) Installation                             ##
+##     2025-11-25: Added -> Password for sudo                                                   ##
+##                 Changed  -> Fix minor bugs                                                   ##
 ## ============================================================================================ ##
 ##  To Do:                                                                                      ##
 ##     - Add more packages and configurations.                                                  ##
@@ -95,22 +97,38 @@ timedatectl set-timezone $timezone
 hostnamectl set-hostname "$hostname"
 echo "127.0.0.1 $hostname" >> /etc/hosts
 
-# create new user and add to sudo group
+# create new user and add to sudo group (sudo bleibt passwortgeschuetzt)
 if id "$user" &>/dev/null; then
   echo "User $user already exists."
 else
-  adduser --disabled-password --gecos "" $user
-  usermod -aG sudo $user
+  adduser --gecos "" "$user"
 fi
+# set password from secrets if provided; fallback to random, hashed value (PasswordAuthentication stays off)
+if passwd -S "$user" | awk '{print $2}' | grep -qE 'NP|L'; then
+  if [ -n "${USER_PASSWORD_HASH:-}" ]; then
+    echo "$user:$USER_PASSWORD_HASH" | chpasswd -e
+  elif [ -n "${USER_PASSWORD:-}" ]; then
+    echo "$user:$USER_PASSWORD" | chpasswd
+  else
+    rand_pw=$(openssl rand -base64 32)
+    hash_pw=$(printf "%s" "$rand_pw" | openssl passwd -6 -stdin)
+    echo "$user:$hash_pw" | chpasswd -e
+    unset rand_pw hash_pw
+  fi
+fi
+usermod -aG sudo "$user"
 
 # copy the ssh keys for new user
 if [ ! -d /home/$user/.ssh ]; then
   mkdir -p /home/$user/.ssh
   chmod 700 /home/$user/.ssh
 fi
-echo "$pubkey" > /home/$user/.ssh/authorized_keys
+touch /home/$user/.ssh/authorized_keys
 chmod 600 /home/$user/.ssh/authorized_keys
 chown -R $user:$user /home/$user/.ssh
+if ! grep -Fxq "$pubkey" /home/$user/.ssh/authorized_keys; then
+  echo "$pubkey" >> /home/$user/.ssh/authorized_keys
+fi
 
 # backup and configure the ssh server
 cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
@@ -124,8 +142,8 @@ sed -i -e '/^\(#\|\)AllowTcpForwarding/s/^.*$/AllowTcpForwarding no/' /etc/ssh/s
 sed -i -e '/^\(#\|\)X11Forwarding/s/^.*$/X11Forwarding no/' /etc/ssh/sshd_config
 sed -i -e '/^\(#\|\)AllowAgentForwarding/s/^.*$/AllowAgentForwarding no/' /etc/ssh/sshd_config
 sed -i -e '/^\(#\|\)AuthorizedKeysFile/s/^.*$/AuthorizedKeysFile .ssh\/authorized_keys/' /etc/ssh/sshd_config
-if ! grep -q "AllowUsers $user" /etc/ssh/sshd_config; then
-    sed -i "$a AllowUsers $user" /etc/ssh/sshd_config
+if ! grep -q "^AllowUsers $user" /etc/ssh/sshd_config; then
+    echo "AllowUsers $user" >> /etc/ssh/sshd_config
 fi
 sshd -t || { echo "Check SSH-Configuration!"; exit 1; }
 systemctl restart sshd
@@ -144,7 +162,9 @@ fi
 ufw default deny incoming
 ufw default allow outgoing
 ufw allow $ssh_port/tcp
-ufw status | grep -q inactive && echo "y" | ufw enable
+if ufw status | grep -q inactive; then
+  echo "y" | ufw enable
+fi
 
 # install and configure fail2ban
 apt install fail2ban -y
@@ -169,7 +189,7 @@ else
 fi
 
 # install and configure docker (commpose)
-apt install -y apt-transport-https ca-certificates curl software-properties-common
+apt install -y apt-transport-https ca-certificates curl software-properties-common gnupg
 install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
 chmod a+r /etc/apt/keyrings/docker.gpg
@@ -184,7 +204,7 @@ if ! apt-cache policy docker-ce | grep -q 'Candidate:'; then
   echo "Docker-CE Paket nicht gefunden!"; exit 1;
 fi
 apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y
-usermod -aG docker $user
+usermod -aG docker "$user"
 
 # install python and development tools
 apt install -y python3 python3-pip python3-dev python3-venv build-essential libssl-dev libffi-dev
