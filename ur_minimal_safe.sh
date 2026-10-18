@@ -174,23 +174,66 @@ EOF
 systemctl daemon-reload
 systemctl enable --now ${COSMOS_SERVICE}.service || echo "Service konnte nicht sofort gestartet — prüfe 'journalctl -u ${COSMOS_SERVICE}.service'"
 
-echo
+# --- Automatisierte Nachschritte: Root-Key Entfernen, Root deaktivieren, Cosmos prüfen ---
 
-echo "=== Nächste, wichtige manuelle Schritte (UNBEDINGT) ==="
-echo "1) Melde dich in einem NEUEN SSH-Fenster an als ${USER}:"
-echo "   ssh -i <dein_privkey> -p ${SSH_PORT} ${USER}@<server-ip>"
-echo "   Oder teste root: ssh -i <dein_privkey> -p ${SSH_PORT} root@<server-ip> (falls benötigt)"
-echo
+# prompt to proceed with removal/disabling
+read -r -p $'\nHast du dich in einem NEUEN SSH-Fenster als \"'"${USER}"'\" angemeldet und getestet?\nWenn ja, kann das Script nun den root-Key entfernen und root-Login endgültig deaktivieren.\n\nWeiter? (y/N): ' proceed
+if [[ "${proceed,,}" == "y" || "${proceed,,}" == "yes" ]]; then
+  # Remove the exact PUBKEY line from root authorized_keys safely
+  if [ -f /root/.ssh/authorized_keys ]; then
+    # Use temporary file to avoid truncation if same file
+    grep -Fvx -- "${PUBKEY}" /root/.ssh/authorized_keys > /root/.ssh/authorized_keys.tmp || true
+    mv /root/.ssh/authorized_keys.tmp /root/.ssh/authorized_keys
+    chmod 600 /root/.ssh/authorized_keys
+    echo "Removed specified public key from /root/.ssh/authorized_keys (if it existed)."
+  else
+    echo "/root/.ssh/authorized_keys not found; nothing to remove."
+  fi
 
-echo "2) Wenn Login funktioniert, entferne den Key aus /root/.ssh/authorized_keys:"
-echo "   sudo sed -i '/${PUBKEY//\//\\/}/d' /root/.ssh/authorized_keys"
-echo 
-echo "3) Danach kannst du root logins komplett deaktivieren (streng):"
-echo "   sudo sed -i 's/^PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config.d/99-hardening.conf"
-echo "   sudo sshd -t && sudo systemctl restart ssh || sudo systemctl restart sshd"
-echo
-echo "4) Prüfe Cosmos Service:"
-echo "   sudo systemctl status ${COSMOS_SERVICE}.service"
-echo "   sudo journalctl -u ${COSMOS_SERVICE}.service -f"
-echo
-echo "ENDE."
+  # Set PermitRootLogin to no in our drop-in (or /etc/ssh/sshd_config if needed)
+  if [ -f /etc/ssh/sshd_config.d/99-hardening.conf ]; then
+    if grep -q "^PermitRootLogin" /etc/ssh/sshd_config.d/99-hardening.conf; then
+      sed -i "s/^PermitRootLogin.*/PermitRootLogin no/" /etc/ssh/sshd_config.d/99-hardening.conf
+    else
+      echo "PermitRootLogin no" >> /etc/ssh/sshd_config.d/99-hardening.conf
+    fi
+    echo "Set PermitRootLogin no in /etc/ssh/sshd_config.d/99-hardening.conf"
+  else
+    # fallback to main sshd_config
+    if grep -q "^PermitRootLogin" /etc/ssh/sshd_config 2>/dev/null; then
+      sed -i "s/^PermitRootLogin.*/PermitRootLogin no/" /etc/ssh/sshd_config
+    else
+      echo "PermitRootLogin no" >> /etc/ssh/sshd_config
+    fi
+    echo "Set PermitRootLogin no in /etc/ssh/sshd_config"
+  fi
+
+  # Validate and restart ssh
+  if sshd -t; then
+    if systemctl restart ssh 2>/dev/null; then
+      echo "sshd neu gestartet (unit: ssh)."
+    elif systemctl restart sshd 2>/dev/null; then
+      echo "sshd neu gestartet (unit: sshd)."
+    else
+      echo "Warnung: Konnte sshd nicht neu starten via systemctl. Prüfe manuell."
+    fi
+  else
+    echo "Fehlerhafte sshd-Konfiguration nach Änderungen. Abbruch - überprüfe /etc/ssh/..."
+  fi
+else
+  echo "Übersprunge Entfernen des root-Keys und Deaktivierung von root-Login. Du kannst dies manuell später ausführen."
+fi
+
+# Cosmos service check
+echo -e "\n--- Cosmos Service Check ---\n"
+if systemctl list-units --type=service --all | grep -q "${COSMOS_SERVICE}.service"; then
+  status=$(systemctl is-active ${COSMOS_SERVICE}.service || true)
+  echo "Service ${COSMOS_SERVICE}.service status: ${status}"
+  echo "Letzte 200 Journal-Zeilen (wenn vorhanden):"
+  journalctl -u ${COSMOS_SERVICE}.service -n 200 --no-pager || true
+else
+  echo "Service ${COSMOS_SERVICE}.service ist nicht registriert. Stelle sicher, dass ${COSMOS_DIR}/start.sh existiert und die systemd Unit korrekt ist."
+fi
+
+
+echo -e "\nFertig. Wenn du root vollständig gesperrt hast, behalte einen sudo-Benutzer mit deinem Key für den Zugriff."
